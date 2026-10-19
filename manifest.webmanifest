@@ -1,0 +1,19 @@
+{
+  "name": "찬양대 연습노트",
+  "short_name": "연습노트",
+  "description": "예배별 선곡, 파트별 연습 음원과 영상, 곡 분석을 한곳에서 보는 성가대 연습 앱",
+  "lang": "ko",
+  "id": "/",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f5f4f8",
+  "theme_color": "#ffffff",
+  "categories": ["music", "education", "lifestyle"],
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

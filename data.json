@@ -1,0 +1,263 @@
+{
+  "choirName": "할렐루야 찬양대",
+  "notice": "예시 데이터입니다. config.js에 Supabase를 연결하면 지휘자가 앱에서 직접 선곡을 관리할 수 있습니다.",
+  "songs": [
+    {
+      "id": "s1",
+      "title": "거룩한 그루터기",
+      "composer": "김민아",
+      "publisher": "유빌라테",
+      "collection": "유빌라테 18집",
+      "page": "309",
+      "level": "중상",
+      "memo": "중간에 어려운 변조 부분이 짧게 있습니다.",
+      "analysis": {
+        "key": "Eb",
+        "meter": "4/4, 2/4",
+        "tempo": "♩=ca.80 → Moderato",
+        "voicing": "SATB",
+        "measures": "63",
+        "notes": "m.1-54: 4/4 Andante ♩=ca.80 → m.40 rall. → m.42 Moderato. m.55부터 2/4로 변박. 셋잇단음표 프레이즈 빈번. ff-pp 폭넓은 다이내믹."
+      },
+      "parts": {
+        "all": {
+          "audio": "http://jubil.cafe24.com/my/18/mp3/18_31.mp3",
+          "youtube": "",
+          "source": "http://jubil.cafe24.com/my/18/htm/31.htm"
+        },
+        "S": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "A": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "T": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "B": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        }
+      }
+    },
+    {
+      "id": "s2",
+      "title": "성령의 열매",
+      "composer": "이근호",
+      "publisher": "와이즈성가",
+      "collection": "와이즈성가 2집",
+      "page": "",
+      "level": "중",
+      "memo": "",
+      "analysis": {
+        "key": "",
+        "meter": "",
+        "tempo": "",
+        "voicing": "SATB",
+        "measures": "",
+        "notes": ""
+      },
+      "parts": {
+        "all": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "S": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "A": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "T": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "B": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        }
+      }
+    },
+    {
+      "id": "s3",
+      "title": "복음밖에 없습니다",
+      "composer": "손경민",
+      "publisher": "기타",
+      "collection": "개별곡",
+      "page": "",
+      "level": "하",
+      "memo": "",
+      "analysis": {
+        "key": "",
+        "meter": "",
+        "tempo": "",
+        "voicing": "SATB",
+        "measures": "",
+        "notes": ""
+      },
+      "parts": {
+        "all": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "S": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "A": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "T": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "B": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        }
+      }
+    },
+    {
+      "id": "s4",
+      "title": "감사하라",
+      "composer": "우효원",
+      "publisher": "기타",
+      "collection": "개별곡",
+      "page": "",
+      "level": "중",
+      "memo": "",
+      "analysis": {
+        "key": "",
+        "meter": "",
+        "tempo": "",
+        "voicing": "SATB",
+        "measures": "",
+        "notes": ""
+      },
+      "parts": {
+        "all": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "S": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "A": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "T": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "B": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        }
+      }
+    },
+    {
+      "id": "s5",
+      "title": "선한 능력으로",
+      "composer": "",
+      "publisher": "기타",
+      "collection": "개별곡",
+      "page": "",
+      "level": "중하",
+      "memo": "",
+      "analysis": {
+        "key": "",
+        "meter": "",
+        "tempo": "",
+        "voicing": "SATB",
+        "measures": "",
+        "notes": ""
+      },
+      "parts": {
+        "all": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "S": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "A": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "T": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        },
+        "B": {
+          "audio": "",
+          "youtube": "",
+          "source": ""
+        }
+      }
+    }
+  ],
+  "services": [
+    {
+      "id": "v1",
+      "date": "2026-10-18",
+      "slot": "낮예배",
+      "songId": "s2"
+    },
+    {
+      "id": "v2",
+      "date": "2026-10-25",
+      "slot": "낮예배",
+      "songId": "s1"
+    },
+    {
+      "id": "v3",
+      "date": "2026-11-01",
+      "slot": "낮예배",
+      "songId": "s4"
+    },
+    {
+      "id": "v4",
+      "date": "2026-11-08",
+      "slot": "낮예배",
+      "songId": "s3"
+    },
+    {
+      "id": "v5",
+      "date": "2026-11-15",
+      "slot": "낮예배",
+      "songId": "s5"
+    }
+  ]
+}
