@@ -23,6 +23,7 @@
   if (!prefs.done) prefs.done = {};
   var ui = { view: "week", selDate: null, songId: null, q: "", pub: "", partTab: {}, admin: false, editSong: null, busy: false, offline: false, loadError: "" };
   var auth = { session: null, editor: false };
+  var loginInFlight = false;
 
   /* ---------- dates & text ---------- */
   function pad(n) { return (n < 10 ? "0" : "") + n; }
@@ -94,9 +95,20 @@
   }
 
   /* ---------- auth ---------- */
+  function withTimeout(p, ms) {
+    return Promise.race([p, new Promise(function (_, rej) { setTimeout(function () { rej(new Error("timeout")); }, ms); })]);
+  }
   function refreshEditor() {
     if (!sb || !auth.session) { auth.editor = false; return Promise.resolve(); }
-    return sb.rpc("is_editor").then(function (r) { auth.editor = !r.error && r.data === true; });
+    return withTimeout(sb.rpc("is_editor"), 10000)
+      .then(function (r) { auth.editor = !r.error && r.data === true; if (r.error) console.error("편집자 확인 오류", r.error); })
+      .catch(function (e) { auth.editor = false; console.error("편집자 확인 실패", e); });
+  }
+  function afterLogin() {
+    refreshEditor().then(function () {
+      toast(auth.editor ? "로그인했어요. 상단의 ‘편집’에서 관리할 수 있어요." : "로그인했지만 편집 권한이 없는 계정이에요.");
+      render();
+    });
   }
 
   /* ---------- audio tools: metronome & starting chord ---------- */
@@ -468,7 +480,7 @@
     }
     else if (act === "install") { if (deferredPrompt) { deferredPrompt.prompt(); deferredPrompt.userChoice.finally(function () { deferredPrompt = null; render(); }); } }
     else if (act === "install-x") { prefs.installDismissed = true; lsSet("choir.prefs", prefs); render(); }
-    else if (act === "logout") { sb.auth.signOut(); }
+    else if (act === "logout") { sb.auth.signOut().finally(function () { auth.session = null; auth.editor = false; ui.admin = false; render(); }); }
     else if (act === "admin") { ui.admin = !ui.admin; ui.editSong = null; go(ui.admin ? "admin" : "week"); }
     else if (act === "save-info") {
       write(sb.from("settings").upsert({ id: 1, choir_name: val("f-choir") || state.choirName, notice: val("f-notice"), updated_at: new Date().toISOString() }), "찬양대 정보를 바꿨어요.");
@@ -512,8 +524,21 @@
     if (e.target.id !== "loginform") return;
     e.preventDefault();
     var btn = e.target.querySelector("button[type=submit]"); btn.disabled = true; btn.textContent = "로그인 중…";
-    sb.auth.signInWithPassword({ email: val("l-email"), password: document.getElementById("l-pass").value }).then(function (r) {
-      if (r.error) { btn.disabled = false; btn.textContent = "로그인"; toast("이메일 또는 비밀번호가 맞지 않아요."); }
+    function reset(msg) { btn.disabled = false; btn.textContent = "로그인"; if (msg) toast(msg); }
+    loginInFlight = true;
+    withTimeout(sb.auth.signInWithPassword({ email: val("l-email"), password: document.getElementById("l-pass").value }), 20000).then(function (r) {
+      loginInFlight = false;
+      if (r.error) {
+        var m = r.error.message || "";
+        reset(/confirm/i.test(m) ? "이메일 확인이 안 된 계정이에요. Supabase에서 Auto Confirm으로 다시 만들어 주세요."
+          : /invalid/i.test(m) ? "이메일 또는 비밀번호가 맞지 않아요." : "로그인하지 못했어요: " + m);
+        return;
+      }
+      auth.session = r.data && r.data.session;
+      afterLogin();
+    }, function (e) {
+      loginInFlight = false;
+      reset(e && e.message === "timeout" ? "응답이 없어요. config.js의 Supabase 주소를 확인하거나 잠시 후 다시 시도하세요." : "인터넷 연결을 확인한 뒤 다시 시도하세요.");
     });
   });
   // A-B 구간 반복 (timeupdate는 버블링되지 않아 캡처 단계에서 받습니다)
@@ -529,14 +554,12 @@
     var authReady = Promise.resolve();
     if (sb) {
       authReady = sb.auth.getSession().then(function (r) { auth.session = r.data && r.data.session; return refreshEditor(); });
+      // Supabase 안내대로 이 콜백 안에서는 다른 Supabase 호출을 하지 않고, 다음 틱으로 미룹니다 (멈춤 방지).
       sb.auth.onAuthStateChange(function (evt, session) {
         if (evt === "INITIAL_SESSION") return;
         auth.session = session;
-        refreshEditor().then(function () {
-          if (evt === "SIGNED_IN") toast(auth.editor ? "로그인했어요. 상단의 ‘편집’에서 관리할 수 있어요." : "로그인했지만 편집 권한이 없는 계정이에요.");
-          if (evt === "SIGNED_OUT") { ui.admin = false; toast("로그아웃했어요."); }
-          render();
-        });
+        if (evt === "SIGNED_OUT") { setTimeout(function () { auth.editor = false; ui.admin = false; toast("로그아웃했어요."); render(); }, 0); return; }
+        if (evt === "SIGNED_IN" && !loginInFlight) setTimeout(afterLogin, 0); // 다른 탭에서 로그인한 경우
       });
     } else if (CFG.supabaseUrl) {
       console.warn("Supabase 라이브러리를 불러오지 못해 읽기 전용으로 동작합니다.");

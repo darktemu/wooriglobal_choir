@@ -4,7 +4,7 @@
  * - Supabase API·음원·유튜브: 캐시하지 않음
  * 배포 내용을 크게 바꿨다면 VERSION 숫자를 올려 주세요.
  */
-var VERSION = "v1";
+var VERSION = "v2";
 var SHELL = "choir-shell-" + VERSION;
 var RUNTIME = "choir-runtime-" + VERSION;
 var SHELL_FILES = [
