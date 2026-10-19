@@ -58,7 +58,16 @@ as $$
 $$;
 grant execute on function public.is_editor() to anon, authenticated;
 
--- 3) 행 단위 보안: 누구나 읽기, 편집자만 쓰기 ----------------------------------
+-- 3) 테이블 접근 권한 ---------------------------------------------------------
+-- 2026년 5월 30일 이후 만든 Supabase 프로젝트는 새 테이블에 권한이 자동으로 주어지지 않습니다.
+-- 아래 GRANT가 없으면 앱에서 "permission denied for table" 오류가 납니다.
+-- 실제로 누가 쓸 수 있는지는 4)의 행 단위 보안 규칙이 결정합니다 (편집자만 쓰기).
+grant usage on schema public to anon, authenticated;
+grant select on public.settings, public.songs, public.services to anon;
+grant select, insert, update, delete on public.settings, public.songs, public.services to authenticated;
+-- editors 표는 일부러 권한을 주지 않습니다 (대시보드에서만 관리).
+
+-- 4) 행 단위 보안: 누구나 읽기, 편집자만 쓰기 ----------------------------------
 
 alter table public.settings enable row level security;
 alter table public.songs    enable row level security;
@@ -82,7 +91,7 @@ end $$;
 
 -- editors 표는 앱에서 읽거나 쓰지 않습니다 (대시보드에서만 관리). 정책이 없으므로 앱에서는 접근 불가.
 
--- 4) 기본 설정 한 줄 ---------------------------------------------------------
+-- 5) 기본 설정 한 줄 ---------------------------------------------------------
 
 insert into public.settings (id, choir_name, notice)
 values (1, '할렐루야 찬양대', '')

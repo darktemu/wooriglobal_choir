@@ -21,7 +21,7 @@
   var state = { choirName: "찬양대", notice: "", songs: [], services: [] };
   var prefs = lsGet("choir.prefs", { part: "all", done: {}, installDismissed: false });
   if (!prefs.done) prefs.done = {};
-  var ui = { view: "week", selDate: null, songId: null, q: "", pub: "", partTab: {}, admin: false, editSong: null, busy: false, offline: false };
+  var ui = { view: "week", selDate: null, songId: null, q: "", pub: "", partTab: {}, admin: false, editSong: null, busy: false, offline: false, loadError: "" };
   var auth = { session: null, editor: false };
 
   /* ---------- dates & text ---------- */
@@ -75,12 +75,22 @@
       p = fetch("/data.json", { cache: "no-cache" }).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); });
     }
     return p.then(function (d) {
-      applyData(d); ui.offline = false; lsSet(CACHE_KEY, d);
-    }).catch(function () {
+      applyData(d); ui.offline = false; ui.loadError = ""; lsSet(CACHE_KEY, d);
+    }).catch(function (e) {
+      ui.loadError = (e && e.code) ? explainDbError(e) : "";
       var c = lsGet(CACHE_KEY, null);
-      if (c) { applyData(c); ui.offline = true; }
-      else throw new Error("load");
+      if (c) { applyData(c); ui.offline = !ui.loadError; }
+      else if (!ui.loadError) throw new Error("load");
     });
+  }
+
+  function explainDbError(e) {
+    var m = (e && e.message) || "", code = e && e.code;
+    if (code === "42501" && /permission denied for (table|schema)/i.test(m)) return "데이터베이스 테이블 권한(GRANT)이 없습니다. Supabase SQL Editor에서 schema.sql의 ‘3) 테이블 접근 권한’ 부분을 실행하세요.";
+    if (code === "42501" || /row-level security/i.test(m)) return "편집 권한이 없는 계정이라 저장되지 않았어요. editors 표에 로그인한 이메일이 있는지 확인하세요.";
+    if (code === "42P01" || /does not exist/i.test(m)) return "데이터베이스에 테이블이 없습니다. Supabase SQL Editor에서 schema.sql 전체를 실행하세요.";
+    if (/JWT|401/i.test(m)) return "로그인이 만료됐어요. 로그아웃 후 다시 로그인하세요.";
+    return "데이터베이스 오류: " + (m || code || "알 수 없음");
   }
 
   /* ---------- auth ---------- */
@@ -368,6 +378,7 @@
 
   /* ---------- shell ---------- */
   function render() {
+    document.title = (state.choirName ? state.choirName + " " : "") + "연습노트";
     if (ui.view === "admin" && !(ui.admin && auth.editor)) { ui.admin = false; ui.view = "week"; }
     var tabs = [["week", "이번 주", ICON.week], ["songs", "곡 목록", ICON.list], ["me", "내 연습", ICON.me]];
     var cur = ui.view === "song" ? "songs" : ui.view;
@@ -375,7 +386,8 @@
     h += '<nav class="tabs" aria-label="주요 화면">' + tabs.map(function (t) { return '<button class="tab" data-act="tab" data-view="' + t[0] + '"' + (cur === t[0] ? ' aria-current="page"' : "") + ">" + t[2] + "<span>" + t[1] + "</span></button>"; }).join("") + "</nav>";
     if (auth.editor) h += '<button class="editbtn" data-act="admin" aria-pressed="' + ui.admin + '">' + (ui.admin ? "편집 닫기" : "편집") + "</button>";
     h += '</div></header><main class="wrap">';
-    if (ui.offline) h += '<div class="notice"><b>오프라인</b><span>마지막으로 받아 둔 내용을 보여주고 있습니다.</span></div>';
+    if (ui.loadError) h += '<div class="notice"><b>연결 오류</b><span>' + esc(ui.loadError) + '</span></div>';
+    else if (ui.offline) h += '<div class="notice"><b>오프라인</b><span>마지막으로 받아 둔 내용을 보여주고 있습니다.</span></div>';
     if (ui.admin && ui.view !== "admin") h += '<div class="btns" style="justify-content:flex-start"><button class="btn mini" data-act="tab" data-view="admin">선곡·곡 관리로 이동</button></div>';
     h += ({ week: viewWeek, songs: viewSongs, song: viewSong, me: viewMe, admin: viewAdmin }[ui.view] || viewWeek)();
     h += '<p class="foot">파트 연습 음원·영상·악보의 저작권은 각 출판사에 있습니다. 이 앱은 연습 편의를 위한 링크만 모아 둡니다.</p></main>';
@@ -394,7 +406,7 @@
   function toast(msg) {
     var t = document.querySelector(".toast");
     if (!t) { t = document.createElement("div"); t.className = "toast"; t.setAttribute("role", "status"); document.body.appendChild(t); }
-    t.textContent = msg; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.hidden = true; }, 2800);
+    t.textContent = msg; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.hidden = true; }, msg.length > 40 ? 7000 : 2800);
   }
 
   /* ---------- writes (Supabase) ---------- */
@@ -408,10 +420,10 @@
       ui.busy = false; render(); if (okMsg) toast(okMsg);
     }).catch(function (e) {
       ui.busy = false;
-      var m = (e && e.message) || "";
-      if (/row-level security|permission|401|403|JWT/i.test(m)) toast("편집 권한이 없어 저장하지 못했어요. 다시 로그인해 보세요.");
-      else if (!navigator.onLine) toast("인터넷 연결이 없어 저장하지 못했어요.");
+      if (!navigator.onLine) toast("인터넷 연결이 없어 저장하지 못했어요.");
+      else if (e && (e.code || e.message)) toast(explainDbError(e));
       else toast("저장하지 못했어요. 잠시 후 다시 시도하세요.");
+      if (e) console.error("Supabase 저장 오류", e);
       render();
     });
   }
