@@ -8,6 +8,6 @@
  * 둘 다 비워 두면 data.json 의 예시 데이터를 읽기 전용으로 보여줍니다.
  */
 window.CHOIR_CONFIG = {
-  supabaseUrl: "https://onzzgaukyjxxlbwglksw.supabase.co/rest/v1/",
+  supabaseUrl: "https://onzzgaukyjxxlbwglksw.supabase.co",
   supabaseAnonKey: "sb_publishable_gKhX42b7l1TDmQ7PlIxvtA_v2Oz2J5y"
 };
