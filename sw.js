@@ -4,11 +4,11 @@
  * - Supabase API·음원·유튜브: 캐시하지 않음
  * 배포 내용을 크게 바꿨다면 VERSION 숫자를 올려 주세요.
  */
-var VERSION = "v2";
+var VERSION = "v3";
 var SHELL = "choir-shell-" + VERSION;
 var RUNTIME = "choir-runtime-" + VERSION;
 var SHELL_FILES = [
-  "/", "/index.html", "/styles.css", "/app.js", "/config.js", "/data.json",
+  "/", "/index.html", "/styles.css", "/app.js", "/config.js",
   "/manifest.webmanifest", "/icons/icon-192.png", "/icons/icon-512.png", "/icons/apple-touch-icon.png"
 ];
 var CDN_HOSTS = ["fonts.googleapis.com", "fonts.gstatic.com", "cdn.jsdelivr.net"];

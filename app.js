@@ -1,11 +1,12 @@
-/* 찬양대 연습노트 — 앱 본체 (빌드 과정 없이 그대로 배포) */
+/* 찬양대 연습노트 — 앱 본체 (여러 성가대 · 로그인 필수 · 빌드 과정 없이 그대로 배포) */
 (function () {
   "use strict";
 
   var PARTS = [["all", "전체"], ["S", "소프라노"], ["A", "알토"], ["T", "테너"], ["B", "베이스"]];
+  var PART_NAME = { all: "전체", S: "소프라노", A: "알토", T: "테너", B: "베이스" };
   var LEVELS = ["하", "중하", "중", "중상", "상"];
+  var ROLE_NAME = { admin: "관리자", editor: "편집자", member: "대원" };
   var DOW = ["일", "월", "화", "수", "목", "금", "토"];
-  var CACHE_KEY = "choir.cache.v1";
 
   var app = document.getElementById("app");
   var CFG = window.CHOIR_CONFIG || {};
@@ -18,12 +19,28 @@
   function lsGet(k, d) { try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
   function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
 
-  var state = { choirName: "찬양대", notice: "", songs: [], services: [] };
-  var prefs = lsGet("choir.prefs", { part: "all", done: {}, installDismissed: false });
+  /* ---------- state ---------- */
+  var session = null;                 // Supabase 로그인 세션
+  var profile = null;                 // {id, display_name, part, choir_id}
+  var choir = null;                   // {id, name, notice}
+  var role = null;                    // admin | editor | member
+  var state = { songs: [], services: [] };
+  var choirList = null;               // list_choirs() 결과
+  var members = null;                 // 대원 목록 (설정 화면)
+  var prefs = lsGet("choir.prefs", { done: {}, installDismissed: false });
   if (!prefs.done) prefs.done = {};
-  var ui = { view: "week", selDate: null, songId: null, q: "", pub: "", partTab: {}, admin: false, editSong: null, busy: false, offline: false, loadError: "" };
-  var auth = { session: null, editor: false };
+  var ui = {
+    screen: "boot",                   // boot | setup | auth | recovery | pick | app
+    authTab: "login",                 // login | signup | forgot
+    view: "week", selDate: null, songId: null, q: "", pub: "", partTab: {},
+    admin: false, editSong: null, busy: false, offline: false, loadError: "", choirQ: ""
+  };
   var loginInFlight = false;
+
+  function uid() { return session && session.user ? session.user.id : null; }
+  function canEdit() { return role === "admin" || role === "editor"; }
+  function myPart() { return (profile && profile.part) || "all"; }
+  function cacheKey() { return "choir.cache.v2." + (uid() || "anon"); }
 
   /* ---------- dates & text ---------- */
   function pad(n) { return (n < 10 ? "0" : "") + n; }
@@ -46,69 +63,104 @@
   function normParts(parts) { var out = {}; PARTS.forEach(function (p) { var x = (parts && parts[p[0]]) || {}; out[p[0]] = { audio: x.audio || "", youtube: x.youtube || "", source: x.source || "" }; }); return out; }
   function blankSong() { return { id: "", title: "", composer: "", publisher: "", collection: "", page: "", level: "중", memo: "", analysis: { key: "", meter: "", tempo: "", voicing: "SATB", measures: "", notes: "" }, parts: normParts({}) }; }
 
-  /* ---------- data loading ---------- */
-  function applyData(d) {
-    state.choirName = d.choirName || "찬양대";
-    state.notice = d.notice || "";
-    state.songs = (d.songs || []).map(function (s) { s.analysis = s.analysis || {}; s.parts = normParts(s.parts); return s; });
-    state.services = d.services || [];
-  }
-  function fromDb(settings, songs, services) {
-    return {
-      choirName: settings && settings.choir_name,
-      notice: settings && settings.notice,
-      songs: (songs || []).map(function (r) { return { id: r.id, title: r.title, composer: r.composer, publisher: r.publisher, collection: r.collection, page: r.page, level: r.level, memo: r.memo, analysis: r.analysis, parts: r.parts }; }),
-      services: (services || []).map(function (r) { return { id: r.id, date: r.date, slot: r.slot, songId: r.song_id }; })
-    };
-  }
-  function load() {
-    var p;
-    if (sb) {
-      p = Promise.all([
-        sb.from("settings").select("*").eq("id", 1).maybeSingle(),
-        sb.from("songs").select("*").order("title"),
-        sb.from("services").select("*").order("date")
-      ]).then(function (r) {
-        for (var i = 0; i < r.length; i++) if (r[i].error) throw r[i].error;
-        return fromDb(r[0].data, r[1].data, r[2].data);
-      });
-    } else {
-      p = fetch("/data.json", { cache: "no-cache" }).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); });
-    }
-    return p.then(function (d) {
-      applyData(d); ui.offline = false; ui.loadError = ""; lsSet(CACHE_KEY, d);
-    }).catch(function (e) {
-      ui.loadError = (e && e.code) ? explainDbError(e) : "";
-      var c = lsGet(CACHE_KEY, null);
-      if (c) { applyData(c); ui.offline = !ui.loadError; }
-      else if (!ui.loadError) throw new Error("load");
-    });
-  }
-
-  function explainDbError(e) {
-    var m = (e && e.message) || "", code = e && e.code;
-    if (code === "42501" && /permission denied for (table|schema)/i.test(m)) return "데이터베이스 테이블 권한(GRANT)이 없습니다. Supabase SQL Editor에서 schema.sql의 ‘3) 테이블 접근 권한’ 부분을 실행하세요.";
-    if (code === "42501" || /row-level security/i.test(m)) return "편집 권한이 없는 계정이라 저장되지 않았어요. editors 표에 로그인한 이메일이 있는지 확인하세요.";
-    if (code === "42P01" || /does not exist/i.test(m)) return "데이터베이스에 테이블이 없습니다. Supabase SQL Editor에서 schema.sql 전체를 실행하세요.";
-    if (/JWT|401/i.test(m)) return "로그인이 만료됐어요. 로그아웃 후 다시 로그인하세요.";
-    return "데이터베이스 오류: " + (m || code || "알 수 없음");
-  }
-
-  /* ---------- auth ---------- */
+  /* ---------- errors ---------- */
   function withTimeout(p, ms) {
     return Promise.race([p, new Promise(function (_, rej) { setTimeout(function () { rej(new Error("timeout")); }, ms); })]);
   }
-  function refreshEditor() {
-    if (!sb || !auth.session) { auth.editor = false; return Promise.resolve(); }
-    return withTimeout(sb.rpc("is_editor"), 10000)
-      .then(function (r) { auth.editor = !r.error && r.data === true; if (r.error) console.error("편집자 확인 오류", r.error); })
-      .catch(function (e) { auth.editor = false; console.error("편집자 확인 실패", e); });
+  function explainDbError(e) {
+    var m = (e && e.message) || "", code = e && e.code;
+    if (/not_admin/.test(m)) return "관리자만 할 수 있어요.";
+    if (/cannot_change_self/.test(m)) return "자기 자신의 역할은 바꿀 수 없어요.";
+    if (/last_admin/.test(m)) return "마지막 관리자는 탈퇴할 수 없어요. 다른 대원을 관리자로 지정한 뒤 탈퇴하세요.";
+    if (/invalid_name/.test(m)) return "성가대 이름을 1~60자로 입력하세요.";
+    if (/choir_not_found/.test(m)) return "없어진 성가대예요. 목록을 새로 고쳐 주세요.";
+    if (code === "42501" && /permission denied for (table|schema|function)/i.test(m)) return "데이터베이스 권한(GRANT)이 없습니다. Supabase SQL Editor에서 schema.sql 전체를 다시 실행하세요.";
+    if (code === "42501" || /row-level security/i.test(m)) return "편집 권한이 없어 저장되지 않았어요. 관리자에게 편집자 지정을 요청하세요.";
+    if (code === "42P01" || code === "PGRST202" || /does not exist|could not find the function/i.test(m)) return "데이터베이스 설정이 최신이 아닙니다. Supabase SQL Editor에서 schema.sql 전체를 실행하세요.";
+    if (/JWT|401/i.test(m)) return "로그인이 만료됐어요. 다시 로그인하세요.";
+    if (m === "timeout") return "서버 응답이 없어요. 잠시 후 다시 시도하세요.";
+    return "오류: " + (m || code || "알 수 없음");
   }
-  function afterLogin() {
-    refreshEditor().then(function () {
-      toast(auth.editor ? "로그인했어요. 상단의 ‘편집’에서 관리할 수 있어요." : "로그인했지만 편집 권한이 없는 계정이에요.");
+  function explainAuthError(e) {
+    var m = (e && e.message) || "";
+    if (/invalid login credentials/i.test(m)) return "이메일 또는 비밀번호가 맞지 않아요.";
+    if (/email not confirmed/i.test(m)) return "이메일 확인이 켜져 있어요. Supabase에서 ‘Confirm email’을 끄면 바로 로그인됩니다.";
+    if (/already registered|already been registered/i.test(m)) return "이미 가입된 이메일이에요. 로그인해 주세요.";
+    if (/password.*(at least|short|characters)/i.test(m)) return "비밀번호는 6자 이상으로 정해 주세요.";
+    if (/signups? not allowed|signup is disabled/i.test(m)) return "가입이 꺼져 있어요. Supabase에서 ‘Allow new users to sign up’을 켜 주세요.";
+    if (/rate limit/i.test(m)) return "요청이 너무 잦아요. 잠시 후 다시 시도하세요.";
+    if (/valid email|invalid email|unable to validate email/i.test(m)) return "이메일 주소 형식을 확인해 주세요.";
+    if (m === "timeout") return "서버 응답이 없어요. config.js의 Supabase 주소를 확인하거나 잠시 후 다시 시도하세요.";
+    if (/fetch|network/i.test(m)) return "인터넷 연결을 확인한 뒤 다시 시도하세요.";
+    return "처리하지 못했어요: " + m;
+  }
+  function rq(p) { return withTimeout(p, 15000).then(function (r) { if (r && r.error) throw r.error; return r ? r.data : null; }); }
+
+  /* ---------- data loading ---------- */
+  function applyChoirData(d) {
+    profile = d.profile; choir = d.choir; role = d.role;
+    state.songs = (d.songs || []).map(function (s) { s.analysis = s.analysis || {}; s.parts = normParts(s.parts); return s; });
+    state.services = (d.services || []).map(function (r) { return { id: r.id, date: r.date, slot: r.slot, songId: r.song_id || r.songId }; });
+  }
+  function loadProfile() {
+    return rq(sb.from("profiles").select("id, display_name, part, choir_id").eq("id", uid()).maybeSingle());
+  }
+  function loadChoirData(p) {
+    var c = p.choir_id;
+    return Promise.all([
+      rq(sb.from("choirs").select("id, name, notice").eq("id", c).maybeSingle()),
+      rq(sb.from("memberships").select("role").eq("choir_id", c).eq("user_id", uid()).maybeSingle()),
+      rq(sb.from("songs").select("*").eq("choir_id", c).order("title")),
+      rq(sb.from("services").select("*").eq("choir_id", c).order("date"))
+    ]).then(function (r) {
+      return { profile: p, choir: r[0], role: r[1] && r[1].role, songs: r[2], services: r[3] };
+    });
+  }
+  // 로그인 후 전체 불러오기 → 알맞은 화면으로
+  function loadAll() {
+    ui.loadError = "";
+    return loadProfile().then(function (p) {
+      if (!p) { profile = { id: uid(), display_name: "", part: "all", choir_id: null }; return enterPick(); }
+      profile = p;
+      if (!p.choir_id) return enterPick();
+      return loadChoirData(p).then(function (d) {
+        if (!d.choir || !d.role) { profile.choir_id = null; return enterPick(); }
+        applyChoirData(d); lsSet(cacheKey(), d); ui.offline = false;
+        if (ui.screen !== "app") { ui.screen = "app"; ui.view = "week"; ui.selDate = null; }
+        render();
+      });
+    }).catch(function (e) {
+      var cached = lsGet(cacheKey(), null);
+      if (!(e && e.code) && cached && cached.choir) {   // 네트워크 문제 → 마지막 내용
+        applyChoirData(cached); ui.offline = true; ui.screen = "app"; render(); return;
+      }
+      ui.loadError = explainDbError(e);
+      if (ui.screen !== "app") ui.screen = "pick";
       render();
     });
+  }
+  function reloadChoir() {
+    if (!profile || !profile.choir_id) return loadAll();
+    return loadChoirData(profile).then(function (d) {
+      if (!d.choir || !d.role) return loadAll();
+      applyChoirData(d); lsSet(cacheKey(), d); ui.offline = false; ui.loadError = "";
+    });
+  }
+  function enterPick() {
+    ui.screen = "pick"; choir = null; role = null; state = { songs: [], services: [] };
+    render();
+    return loadChoirList();
+  }
+  function loadChoirList() {
+    choirList = null;
+    return rq(sb.rpc("list_choirs")).then(function (rows) { choirList = rows || []; render(); })
+      .catch(function (e) { choirList = []; ui.loadError = explainDbError(e); render(); });
+  }
+  function loadMembers() {
+    if (!choir) return;
+    rq(sb.from("memberships").select("user_id, role, joined_at, profiles(display_name, part)").eq("choir_id", choir.id).order("joined_at"))
+      .then(function (rows) { members = rows || []; if (ui.view === "settings") render(); })
+      .catch(function (e) { members = []; toast(explainDbError(e)); });
   }
 
   /* ---------- audio tools: metronome & starting chord ---------- */
@@ -165,7 +217,8 @@
   var ICON = {
     week: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/></svg>',
     list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>',
-    me: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c1-3.5 3.8-5 7-5s6 1.5 7 5"/></svg>',
+    me: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 12.5l4 4 10-10"/></svg>',
+    gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c1-3.5 3.8-5 7-5s6 1.5 7 5"/></svg>',
     play: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13l11-6.5z"/></svg>',
     yt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="3"/><path d="M10.5 9.5v5l4-2.5z" fill="currentColor"/></svg>',
     src: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>'
@@ -173,6 +226,7 @@
 
   /* ---------- render pieces ---------- */
   function levelPill(l) { return l ? '<span class="lv lv-' + esc(l) + '">난이도 ' + esc(l) + "</span>" : ""; }
+  function rolePill(r) { return r ? '<span class="role role-' + esc(r) + '">' + esc(ROLE_NAME[r] || r) + "</span>" : ""; }
   function bookLine(s) {
     var bits = [];
     if (s.collection) bits.push(esc(s.collection)); else if (s.publisher) bits.push(esc(s.publisher));
@@ -186,12 +240,12 @@
       + '<button class="tool" data-act="ab">구간 시작(A)</button><span class="abtxt"></span></div></div>';
   }
   function practice(song) {
-    var tab = ui.partTab[song.id] || prefs.part || "all";
+    var tab = ui.partTab[song.id] || myPart();
     var p = song.parts[tab];
     var h = '<div><p class="block-h">파트별 연습</p><div class="parts" role="tablist" aria-label="파트 선택">';
     PARTS.forEach(function (pp) {
       h += '<button class="pt p-' + pp[0] + '" role="tab" aria-selected="' + (tab === pp[0]) + '" data-act="part" data-id="' + esc(song.id) + '" data-part="' + pp[0] + '"' + (hasLinks(song.parts[pp[0]]) ? "" : ' title="링크 없음"') + ">"
-        + (pp[0] !== "all" ? "<i></i>" : "") + pp[1] + (prefs.part === pp[0] && pp[0] !== "all" ? ' <span class="mine">내 파트</span>' : "") + "</button>";
+        + (pp[0] !== "all" ? "<i></i>" : "") + pp[1] + (myPart() === pp[0] && pp[0] !== "all" ? ' <span class="mine">내 파트</span>' : "") + "</button>";
     });
     h += "</div>";
     if (hasLinks(p)) {
@@ -240,7 +294,7 @@
   var deferredPrompt = null;
   var isStandalone = (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone === true;
   var isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-  window.addEventListener("beforeinstallprompt", function (e) { e.preventDefault(); deferredPrompt = e; if (ui.view === "week") render(); });
+  window.addEventListener("beforeinstallprompt", function (e) { e.preventDefault(); deferredPrompt = e; if (ui.screen === "app" && ui.view === "week") render(); });
   function installBanner() {
     if (isStandalone || prefs.installDismissed || (!deferredPrompt && !isIOS)) return "";
     var msg = deferredPrompt ? "<b>홈 화면에 설치</b>하면 앱처럼 바로 열 수 있어요."
@@ -248,31 +302,107 @@
     return '<div class="install"><p>' + msg + "</p>" + (deferredPrompt ? '<button class="btn primary mini" data-act="install">설치</button>' : "") + '<button class="btn mini" data-act="install-x" aria-label="안내 닫기">닫기</button></div>';
   }
 
-  /* ---------- views ---------- */
+  /* ---------- screens before the app ---------- */
+  function shell(inner) {
+    return '<div class="gate"><div class="gate-card"><div class="gate-brand"><img src="/icons/icon-192.png" alt="" width="44" height="44"><div><small>성가대 연습실</small><b>찬양대 연습노트</b></div></div>' + inner + "</div></div>";
+  }
+  function viewSetup() {
+    return shell('<p class="gate-lead">아직 서버가 연결되지 않았어요.</p><p class="empty" style="margin:0">관리자는 <code>config.js</code>에 Supabase 주소와 키를 넣고 다시 배포하세요. 자세한 방법은 README.md에 있습니다.</p>');
+  }
+  function viewAuth() {
+    var t = ui.authTab, h = "";
+    h += '<div class="seg wide" role="tablist" aria-label="로그인 또는 가입">'
+      + '<button role="tab" data-act="auth-tab" data-tab="login" aria-pressed="' + (t === "login") + '">로그인</button>'
+      + '<button role="tab" data-act="auth-tab" data-tab="signup" aria-pressed="' + (t === "signup") + '">가입하기</button></div>';
+    if (t === "login") {
+      h += '<form id="loginform" class="gate-form">'
+        + '<label>이메일<input id="a-email" type="email" autocomplete="username" required></label>'
+        + '<label>비밀번호<input id="a-pass" type="password" autocomplete="current-password" required></label>'
+        + '<button class="btn primary big" type="submit">로그인</button>'
+        + '<button class="linkbtn" type="button" data-act="auth-tab" data-tab="forgot">비밀번호를 잊었어요</button></form>';
+    } else if (t === "signup") {
+      h += '<form id="signupform" class="gate-form">'
+        + '<label>이름<input id="a-name" autocomplete="name" maxlength="30" placeholder="예: 김알토" required></label>'
+        + '<fieldset class="partpick"><legend>내 파트</legend>' + [["S", "소프라노"], ["A", "알토"], ["T", "테너"], ["B", "베이스"], ["all", "미정"]].map(function (p, i) {
+          return '<label><input type="radio" name="a-part" value="' + p[0] + '"' + (i === 4 ? " checked" : "") + "><span>" + p[1] + "</span></label>";
+        }).join("") + "</fieldset>"
+        + '<label>이메일<input id="a-email" type="email" autocomplete="username" required></label>'
+        + '<label>비밀번호 (6자 이상)<input id="a-pass" type="password" autocomplete="new-password" minlength="6" required></label>'
+        + '<button class="btn primary big" type="submit">가입하고 시작하기</button>'
+        + '<p class="empty" style="margin:0">가입하면 바로 승인됩니다. 다음 화면에서 성가대를 고르세요.</p></form>';
+    } else {
+      h += '<form id="forgotform" class="gate-form"><p class="empty" style="margin:0">가입한 이메일로 비밀번호 재설정 링크를 보내 드려요.</p>'
+        + '<label>이메일<input id="a-email" type="email" autocomplete="username" required></label>'
+        + '<button class="btn primary big" type="submit">재설정 메일 보내기</button>'
+        + '<button class="linkbtn" type="button" data-act="auth-tab" data-tab="login">로그인으로 돌아가기</button></form>';
+    }
+    return shell(h);
+  }
+  function viewRecovery() {
+    return shell('<form id="recoveryform" class="gate-form"><p class="gate-lead">새 비밀번호를 정해 주세요.</p>'
+      + '<label>새 비밀번호 (6자 이상)<input id="a-pass" type="password" autocomplete="new-password" minlength="6" required></label>'
+      + '<button class="btn primary big" type="submit">비밀번호 바꾸기</button></form>');
+  }
+  function choirPicker(inApp) {
+    var h = "";
+    if (ui.loadError) h += '<div class="notice"><b>오류</b><span>' + esc(ui.loadError) + "</span></div>";
+    h += '<div class="search"><input id="cq" type="search" placeholder="성가대 이름 검색" value="' + esc(ui.choirQ) + '" aria-label="성가대 검색"></div>';
+    h += '<ul class="list choirs" id="choirlist">' + choirRows() + "</ul>";
+    h += '<div class="newchoir"><p class="block-h" style="margin:0">찾는 성가대가 없나요?</p><div class="row2"><input id="new-choir" maxlength="60" placeholder="예: 은평교회 할렐루야 찬양대" aria-label="새 성가대 이름"><button class="btn primary" data-act="create-choir">새 성가대 만들기</button></div>'
+      + '<p class="empty" style="margin:0">교회 이름을 함께 쓰면 다른 성가대와 헷갈리지 않아요. 만든 사람이 관리자가 됩니다.</p></div>';
+    if (!inApp) h += '<div class="btns" style="justify-content:space-between"><span class="empty" style="margin:0">' + esc((profile && profile.display_name) || "") + "님, 환영합니다</span>" + '<button class="btn mini" data-act="logout">로그아웃</button></div>';
+    return h;
+  }
+  function choirRows() {
+    if (choirList === null) return '<li><p class="empty" style="padding:12px 16px;margin:0">성가대 목록을 불러오는 중…</p></li>';
+    var q = ui.choirQ.trim().toLowerCase();
+    var rows = choirList.filter(function (c) { return !q || c.name.toLowerCase().indexOf(q) >= 0; });
+    if (!rows.length) return '<li><p class="empty" style="padding:12px 16px;margin:0">' + (choirList.length ? "검색 결과가 없습니다." : "아직 등록된 성가대가 없어요. 아래에서 첫 성가대를 만들어 주세요.") + "</p></li>";
+    var cur = profile && profile.choir_id;
+    return rows.map(function (c) {
+      var label = c.id === cur ? "지금 성가대" : c.is_member ? "이동" : "가입";
+      return '<li><div class="row"><span class="t"><b>' + esc(c.name) + "</b><span>대원 " + c.member_count + "명" + (c.is_member ? " · 가입함" : "") + "</span></span>"
+        + (c.id === cur ? '<span class="ok-mark">지금 성가대</span>' : '<button class="btn mini' + (c.is_member ? "" : " primary") + '" data-act="join-choir" data-id="' + esc(c.id) + '" data-name="' + esc(c.name) + '">' + label + "</button>")
+        + "</div></li>";
+    }).join("");
+  }
+  function viewPick() {
+    return shell('<p class="gate-lead">함께할 성가대를 골라 주세요</p><p class="empty" style="margin:0 0 4px">고르면 바로 가입됩니다. 나중에 ‘설정’에서 바꿀 수 있어요.</p>' + choirPicker(false));
+  }
+
+  /* ---------- app views ---------- */
   function viewWeek() {
     var ds = dates(), nd = nextDate();
     if (!ui.selDate || ds.indexOf(ui.selDate) < 0) ui.selDate = nd;
     var h = installBanner();
-    if (state.notice) h += '<div class="notice"><b>공지</b><span>' + esc(state.notice) + "</span></div>";
+    if (choir.notice) h += '<div class="notice"><b>공지</b><span>' + esc(choir.notice) + "</span></div>";
     if (nd) {
       var svcs = servicesSorted().filter(function (s) { return s.date === nd; });
       var dd = daysUntil(nd), when = dd === 0 ? "오늘" : dd > 0 ? dd + "일 남음" : "지난 예배";
       var titles = svcs.map(function (s) { var so = songById(s.songId); return so ? so.title : ""; }).filter(Boolean);
-      h += '<section class="hero" aria-label="다음 예배"><div class="eyebrow">다음 찬양 · ' + when + "</div><h1>" + esc(titles.join(" / ") || "선곡 준비 중") + '</h1><p class="when">' + fmtLong(nd) + " · " + esc(svcs.map(function (s) { return s.slot; }).join(", ")) + '</p><p class="count">' + esc(state.choirName) + "</p></section>";
+      h += '<section class="hero" aria-label="다음 예배"><div class="eyebrow">다음 찬양 · ' + when + "</div><h1>" + esc(titles.join(" / ") || "선곡 준비 중") + '</h1><p class="when">' + fmtLong(nd) + " · " + esc(svcs.map(function (s) { return s.slot; }).join(", ")) + '</p><p class="count">' + esc(choir.name) + "</p></section>";
     }
-    h += '<section style="display:flex;flex-direction:column;gap:12px"><div class="sec-title"><h2>예배별 선곡</h2><p>날짜를 눌러 그날 부를 곡을 확인하세요</p></div><div class="strip" id="strip">';
-    var t = today();
-    ds.forEach(function (d) {
-      var svcs = state.services.filter(function (s) { return s.date === d; });
-      var sub = svcs.length > 1 ? svcs.length + "회 예배" : (svcs[0] ? svcs[0].slot : "");
-      h += '<button class="chip' + (d < t ? " past" : "") + (d === nd ? " next" : "") + '" data-act="date" data-date="' + d + '" aria-pressed="' + (d === ui.selDate) + '"><b>' + fmtShort(d) + "</b><span>" + (d === nd ? "다음 · " : "") + esc(sub) + "</span></button>";
-    });
-    h += "</div></section>";
+    h += '<section style="display:flex;flex-direction:column;gap:12px"><div class="sec-title"><h2>예배별 선곡</h2><p>날짜를 눌러 그날 부를 곡을 확인하세요</p></div>';
+    if (ds.length) {
+      h += '<div class="strip" id="strip">';
+      var t = today();
+      ds.forEach(function (d) {
+        var svcs = state.services.filter(function (s) { return s.date === d; });
+        var sub = svcs.length > 1 ? svcs.length + "회 예배" : (svcs[0] ? svcs[0].slot : "");
+        h += '<button class="chip' + (d < t ? " past" : "") + (d === nd ? " next" : "") + '" data-act="date" data-date="' + d + '" aria-pressed="' + (d === ui.selDate) + '"><b>' + fmtShort(d) + "</b><span>" + (d === nd ? "다음 · " : "") + esc(sub) + "</span></button>";
+      });
+      h += "</div>";
+    }
+    h += "</section>";
     if (ui.selDate) {
       h += '<section style="display:flex;flex-direction:column;gap:14px"><div class="sec-title"><h2>' + fmtLong(ui.selDate) + "</h2></div>";
       servicesSorted().filter(function (s) { return s.date === ui.selDate; }).forEach(function (s) { var so = songById(s.songId); if (so) h += songCard(so, s); });
       h += "</section>";
-    } else h += '<p class="empty">등록된 예배 일정이 없습니다.' + (auth.editor ? " 편집에서 첫 선곡을 추가하세요." : "") + "</p>";
+    } else {
+      h += '<section class="panel"><p style="margin:0">아직 등록된 선곡이 없습니다.</p>'
+        + (canEdit() ? '<p class="empty" style="margin:0">상단의 ‘편집’에서 곡을 추가하고 예배 날짜에 선곡하세요.</p><div class="btns" style="justify-content:flex-start"><button class="btn primary" data-act="admin">편집 시작</button></div>'
+          : '<p class="empty" style="margin:0">지휘자나 편집자가 선곡을 올리면 여기에 보입니다.</p>') + "</section>";
+    }
     return h;
   }
 
@@ -291,7 +421,7 @@
       if (ui.pub && s.publisher !== ui.pub) return false;
       return !q || [s.title, s.composer, s.collection, s.publisher].join(" ").toLowerCase().indexOf(q) >= 0;
     }).sort(function (a, b) { return a.title.localeCompare(b.title, "ko"); });
-    if (!rows.length) return '<li><p class="empty" style="padding:12px 16px;margin:0">조건에 맞는 곡이 없습니다.</p></li>';
+    if (!rows.length) return '<li><p class="empty" style="padding:12px 16px;margin:0">' + (state.songs.length ? "조건에 맞는 곡이 없습니다." : "아직 등록된 곡이 없습니다.") + "</p></li>";
     return rows.map(function (s) {
       var dots = PARTS.map(function (p) { return '<i class="' + (hasLinks(s.parts[p[0]]) ? p[0] : "") + '" title="' + p[1] + '"></i>'; }).join("");
       return '<li><button class="row" data-act="song" data-id="' + esc(s.id) + '"><span class="t"><b>' + esc(s.title) + "</b><span>" + [esc(s.composer), bookLine(s)].filter(Boolean).join(" · ") + "</span></span>"
@@ -316,12 +446,7 @@
     var ids = []; upcoming.forEach(function (v) { if (ids.indexOf(v.songId) < 0 && songById(v.songId)) ids.push(v.songId); });
     var done = ids.filter(function (id) { return prefs.done[id]; }).length;
     var pct = ids.length ? Math.round(done / ids.length * 100) : 0;
-    var h = '<div class="sec-title"><h2>내 연습</h2><p>이 기기에만 저장됩니다</p></div>';
-    h += '<section class="panel"><p class="block-h" style="margin:0">내 파트</p><div class="mypart">';
-    [["S", "소프라노", "S"], ["A", "알토", "A"], ["T", "테너", "T"], ["B", "베이스", "B"], ["all", "전체", "♫"]].forEach(function (p) {
-      h += '<button data-act="mypart" data-part="' + p[0] + '" aria-pressed="' + (prefs.part === p[0]) + '"><b>' + p[2] + "</b>" + p[1] + "</button>";
-    });
-    h += '</div><p class="empty" style="margin:0">고른 파트가 모든 곡의 연습 탭에서 먼저 열립니다.</p></section>';
+    var h = '<div class="sec-title"><h2>내 연습</h2><p>' + esc(PART_NAME[myPart()]) + " 파트 · 연습 완료 표시는 이 기기에만 저장됩니다</p></div>";
     h += '<section class="panel"><div class="sec-title"><p class="block-h" style="margin:0">다가오는 곡 준비도</p><p><span class="pnum">' + done + " / " + ids.length + '</span>곡</p></div><div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><span style="width:' + pct + '%"></span></div>';
     if (ids.length) {
       h += '<ul class="list" style="border-radius:10px">';
@@ -331,30 +456,64 @@
       });
       h += "</ul>";
     } else h += '<p class="empty" style="margin:0">예정된 예배가 없습니다.</p>';
-    h += "</section>";
-    h += loginPanel();
+    return h + "</section>";
+  }
+
+  function viewSettings() {
+    var email = session && session.user && session.user.email;
+    var h = '<div class="sec-title"><h2>설정</h2><p>' + esc(email || "") + "</p></div>";
+    // 내 정보
+    h += '<section class="panel"><p class="block-h" style="margin:0">내 정보</p><div class="form">'
+      + '<label class="full">이름<input id="p-name" maxlength="30" value="' + esc(profile.display_name) + '"></label></div>'
+      + '<div class="mypart">' + [["S", "소프라노", "S"], ["A", "알토", "A"], ["T", "테너", "T"], ["B", "베이스", "B"], ["all", "전체", "♫"]].map(function (p) {
+        return '<button data-act="mypart" data-part="' + p[0] + '" aria-pressed="' + (myPart() === p[0]) + '"><b>' + p[2] + "</b>" + p[1] + "</button>";
+      }).join("") + "</div>"
+      + '<p class="empty" style="margin:0">고른 파트가 모든 곡의 연습 탭에서 먼저 열립니다.</p>'
+      + '<div class="btns"><button class="btn primary" data-act="save-profile">이름 저장</button></div></section>';
+    // 성가대
+    h += '<section class="panel"><p class="block-h" style="margin:0">내 성가대</p>'
+      + '<div class="row" style="padding:0;cursor:default"><span class="t"><b>' + esc(choir.name) + "</b><span>내 역할</span></span>" + rolePill(role) + "</div>"
+      + '<div class="btns" style="justify-content:flex-start"><button class="btn primary" data-act="tab" data-view="choirs">성가대 변경·추가</button><button class="btn danger" data-act="leave-choir">이 성가대 탈퇴</button></div></section>';
+    // 대원 관리
+    if (role === "admin" || role === "editor") {
+      h += '<section class="panel"><div class="sec-title"><p class="block-h" style="margin:0">대원 <span class="pnum">' + (members ? members.length : "…") + "</span>명</p>"
+        + (role === "admin" ? '<p>관리자는 역할을 바꾸거나 내보낼 수 있어요</p>' : "") + "</div>";
+      if (members === null) h += '<p class="empty" style="margin:0">불러오는 중…</p>';
+      else {
+        h += '<ul class="adm-list">' + members.map(function (m) {
+          var p = m.profiles || {}, me = m.user_id === uid();
+          var ctl = (role === "admin" && !me)
+            ? '<select data-act="role" data-id="' + esc(m.user_id) + '" aria-label="역할">' + ["member", "editor", "admin"].map(function (r) { return "<option value=\"" + r + "\"" + (m.role === r ? " selected" : "") + ">" + ROLE_NAME[r] + "</option>"; }).join("") + "</select>"
+              + '<button class="btn danger mini" data-act="remove-member" data-id="' + esc(m.user_id) + '">내보내기</button>'
+            : rolePill(m.role);
+          return '<li><span class="grow">' + esc(p.display_name || "이름 없음") + (me ? " (나)" : "") + ' <span class="empty" style="font-size:12.5px">' + esc(PART_NAME[p.part] || "") + "</span></span>" + ctl + "</li>";
+        }).join("") + "</ul>";
+      }
+      h += "</section>";
+    }
+    // 계정
+    h += '<section class="panel"><p class="block-h" style="margin:0">계정</p><form id="pwform" class="form">'
+      + '<label class="full">새 비밀번호 (6자 이상)<input id="p-pass" type="password" autocomplete="new-password" minlength="6"></label></form>'
+      + '<div class="btns" style="justify-content:space-between"><button class="btn" data-act="logout">로그아웃</button><button class="btn" data-act="change-pass">비밀번호 바꾸기</button></div></section>';
     return h;
   }
-  function loginPanel() {
-    var h = '<section class="panel login"><p class="block-h" style="margin:0">지휘자·임원 로그인</p>';
-    if (!sb) return h + '<p class="empty" style="margin:0">지금은 예시 데이터를 보여주는 읽기 전용 모드입니다. config.js에 Supabase를 연결하면 로그인과 편집이 켜집니다.</p></section>';
-    if (auth.session) {
-      var email = auth.session.user && auth.session.user.email;
-      h += '<p style="margin:0">' + esc(email) + " 계정으로 로그인했습니다. " + (auth.editor ? "편집 권한이 있습니다." : "<b>편집 권한이 없는 계정</b>입니다. 관리자에게 편집자 등록을 요청하세요.") + "</p>";
-      return h + '<div class="btns" style="justify-content:flex-start">' + (auth.editor ? '<button class="btn primary" data-act="admin">편집 열기</button>' : "") + '<button class="btn" data-act="logout">로그아웃</button></div></section>';
-    }
-    return h + '<form id="loginform" class="login"><div class="row2"><input id="l-email" type="email" autocomplete="username" placeholder="이메일" required><input id="l-pass" type="password" autocomplete="current-password" placeholder="비밀번호" required></div><div class="btns" style="justify-content:flex-start"><button class="btn primary" type="submit">로그인</button></div><p class="empty" style="margin:0">대원은 로그인하지 않아도 모든 내용을 볼 수 있습니다.</p></form></section>';
+  function viewChoirs() {
+    return '<button class="back" data-act="tab" data-view="settings">← 설정</button><div class="sec-title"><h2>성가대 변경·추가</h2><p>고르면 바로 그 성가대로 이동합니다</p></div>'
+      + '<section class="panel">' + choirPicker(true) + "</section>";
   }
 
   function viewAdmin() {
-    var h = '<div class="sec-title"><h2>편집</h2><p>적용하면 바로 모든 대원에게 반영됩니다</p></div>';
-    h += '<section class="panel"><p class="block-h" style="margin:0">찬양대 정보</p><div class="form"><label class="full">찬양대 이름<input id="f-choir" value="' + esc(state.choirName) + '"></label><label class="full">공지 (비우면 숨김)<textarea id="f-notice">' + esc(state.notice) + '</textarea></label></div><div class="btns"><button class="btn primary" data-act="save-info">적용</button></div></section>';
+    var h = '<div class="sec-title"><h2>편집</h2><p>적용하면 바로 ' + esc(choir.name) + " 대원 모두에게 반영됩니다</p></div>";
+    h += '<section class="panel"><p class="block-h" style="margin:0">성가대 정보</p><div class="form"><label class="full">성가대 이름<input id="f-choir" maxlength="60" value="' + esc(choir.name) + '"></label><label class="full">공지 (비우면 숨김)<textarea id="f-notice">' + esc(choir.notice) + '</textarea></label></div><div class="btns"><button class="btn primary" data-act="save-info">이름·공지 저장</button></div></section>';
     var sorted = state.songs.slice().sort(function (a, b) { return a.title.localeCompare(b.title, "ko"); });
-    h += '<section class="panel"><p class="block-h" style="margin:0">예배 선곡 추가</p><div class="form">'
-      + '<label>날짜<input id="f-date" type="date" value="' + esc(nextSunday()) + '"></label>'
-      + '<label>예배<input id="f-slot" list="slots" value="낮예배"><datalist id="slots"><option value="낮예배"><option value="저녁예배"><option value="새벽예배"><option value="특별예배"></datalist></label>'
-      + '<label class="full">곡<select id="f-song">' + sorted.map(function (s) { return '<option value="' + esc(s.id) + '">' + esc(s.title) + (s.composer ? " — " + esc(s.composer) : "") + "</option>"; }).join("") + "</select></label>"
-      + '</div><div class="btns"><button class="btn primary" data-act="add-svc">선곡 추가</button></div>';
+    h += '<section class="panel"><p class="block-h" style="margin:0">예배 선곡 추가</p>';
+    if (sorted.length) {
+      h += '<div class="form">'
+        + '<label>날짜<input id="f-date" type="date" value="' + esc(nextSunday()) + '"></label>'
+        + '<label>예배<input id="f-slot" list="slots" value="낮예배"><datalist id="slots"><option value="낮예배"><option value="저녁예배"><option value="새벽예배"><option value="특별예배"></datalist></label>'
+        + '<label class="full">곡<select id="f-song">' + sorted.map(function (s) { return '<option value="' + esc(s.id) + '">' + esc(s.title) + (s.composer ? " — " + esc(s.composer) : "") + "</option>"; }).join("") + "</select></label>"
+        + '</div><div class="btns"><button class="btn primary" data-act="add-svc">선곡 추가</button></div>';
+    } else h += '<p class="empty" style="margin:0">먼저 아래 ‘곡 관리’에서 곡을 추가하세요.</p>';
     h += '<ul class="adm-list">' + servicesSorted().slice().reverse().map(function (v) { var s = songById(v.songId); return "<li><time>" + v.date.replace(/-/g, ".") + '</time><span class="grow">' + esc(v.slot) + " · " + esc(s ? s.title : "(삭제된 곡)") + '</span><button class="btn danger mini" data-act="del-svc" data-id="' + esc(v.id) + '">삭제</button></li>'; }).join("") + "</ul></section>";
     h += '<section class="panel"><div class="sec-title"><p class="block-h" style="margin:0">곡 관리</p><button class="btn mini" data-act="new-song">+ 새 곡</button></div>';
     if (ui.editSong) h += songForm(ui.editSong);
@@ -390,18 +549,24 @@
 
   /* ---------- shell ---------- */
   function render() {
-    document.title = (state.choirName ? state.choirName + " " : "") + "연습노트";
-    if (ui.view === "admin" && !(ui.admin && auth.editor)) { ui.admin = false; ui.view = "week"; }
-    var tabs = [["week", "이번 주", ICON.week], ["songs", "곡 목록", ICON.list], ["me", "내 연습", ICON.me]];
-    var cur = ui.view === "song" ? "songs" : ui.view;
-    var h = '<header class="top"><div class="wrap"><div class="brand"><small>성가대 연습실</small><b>' + esc(state.choirName) + "</b></div>";
+    if (ui.screen !== "app") {
+      document.title = "찬양대 연습노트";
+      app.innerHTML = ({ boot: function () { return '<div class="boot">불러오는 중…</div>'; }, setup: viewSetup, auth: viewAuth, recovery: viewRecovery, pick: viewPick }[ui.screen])();
+      bindSearch();
+      return;
+    }
+    document.title = choir.name + " 연습노트";
+    if (ui.view === "admin" && !(ui.admin && canEdit())) { ui.admin = false; ui.view = "week"; }
+    var tabs = [["week", "이번 주", ICON.week], ["songs", "곡 목록", ICON.list], ["me", "내 연습", ICON.me], ["settings", "설정", ICON.gear]];
+    var cur = ui.view === "song" ? "songs" : ui.view === "choirs" ? "settings" : ui.view;
+    var h = '<header class="top"><div class="wrap"><button class="brand" data-act="tab" data-view="choirs" aria-label="성가대 변경"><small>성가대 연습실 · ' + esc(ROLE_NAME[role] || "") + "</small><b>" + esc(choir.name) + "</b></button>";
     h += '<nav class="tabs" aria-label="주요 화면">' + tabs.map(function (t) { return '<button class="tab" data-act="tab" data-view="' + t[0] + '"' + (cur === t[0] ? ' aria-current="page"' : "") + ">" + t[2] + "<span>" + t[1] + "</span></button>"; }).join("") + "</nav>";
-    if (auth.editor) h += '<button class="editbtn" data-act="admin" aria-pressed="' + ui.admin + '">' + (ui.admin ? "편집 닫기" : "편집") + "</button>";
+    if (canEdit()) h += '<button class="editbtn" data-act="admin" aria-pressed="' + ui.admin + '">' + (ui.admin ? "편집 닫기" : "편집") + "</button>";
     h += '</div></header><main class="wrap">';
-    if (ui.loadError) h += '<div class="notice"><b>연결 오류</b><span>' + esc(ui.loadError) + '</span></div>';
+    if (ui.loadError) h += '<div class="notice"><b>연결 오류</b><span>' + esc(ui.loadError) + "</span></div>";
     else if (ui.offline) h += '<div class="notice"><b>오프라인</b><span>마지막으로 받아 둔 내용을 보여주고 있습니다.</span></div>';
     if (ui.admin && ui.view !== "admin") h += '<div class="btns" style="justify-content:flex-start"><button class="btn mini" data-act="tab" data-view="admin">선곡·곡 관리로 이동</button></div>';
-    h += ({ week: viewWeek, songs: viewSongs, song: viewSong, me: viewMe, admin: viewAdmin }[ui.view] || viewWeek)();
+    h += ({ week: viewWeek, songs: viewSongs, song: viewSong, me: viewMe, settings: viewSettings, choirs: viewChoirs, admin: viewAdmin }[ui.view] || viewWeek)();
     h += '<p class="foot">파트 연습 음원·영상·악보의 저작권은 각 출판사에 있습니다. 이 앱은 연습 편의를 위한 링크만 모아 둡니다.</p></main>';
     var old = document.getElementById("strip"), sx = old ? old.scrollLeft : null;
     app.innerHTML = h;
@@ -410,10 +575,20 @@
       if (sx != null) strip.scrollLeft = sx;
       else { var sel = strip.querySelector('[aria-pressed="true"]'); if (sel) strip.scrollLeft = Math.max(0, sel.offsetLeft - strip.offsetLeft - 40); }
     }
+    bindSearch();
+  }
+  function bindSearch() {
     var q = document.getElementById("q");
     if (q) q.addEventListener("input", function () { ui.q = q.value; document.getElementById("songlist").innerHTML = songRows(); });
+    var cq = document.getElementById("cq");
+    if (cq) cq.addEventListener("input", function () { ui.choirQ = cq.value; document.getElementById("choirlist").innerHTML = choirRows(); });
   }
-  function go(view) { ui.view = view; render(); window.scrollTo(0, 0); }
+  function go(view) {
+    ui.view = view;
+    if (view === "settings") { members = null; if (canEdit()) loadMembers(); }
+    if (view === "choirs") { ui.loadError = ""; loadChoirList(); }
+    render(); window.scrollTo(0, 0);
+  }
   var toastTimer = null;
   function toast(msg) {
     var t = document.querySelector(".toast");
@@ -421,37 +596,67 @@
     t.textContent = msg; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.hidden = true; }, msg.length > 40 ? 7000 : 2800);
   }
 
-  /* ---------- writes (Supabase) ---------- */
-  function write(promise, okMsg) {
-    if (ui.busy) return Promise.resolve();
+  /* ---------- writes ---------- */
+  function write(p, okMsg, after) {
+    if (ui.busy) { toast("처리하는 중이에요. 잠시만 기다려 주세요."); return Promise.resolve(); }
     ui.busy = true;
-    return promise.then(function (r) {
-      if (r && r.error) throw r.error;
-      return load();
-    }).then(function () {
+    return rq(p).then(function () { return after ? after() : reloadChoir(); }).then(function () {
       ui.busy = false; render(); if (okMsg) toast(okMsg);
     }).catch(function (e) {
-      ui.busy = false;
-      if (!navigator.onLine) toast("인터넷 연결이 없어 저장하지 못했어요.");
-      else if (e && (e.code || e.message)) toast(explainDbError(e));
-      else toast("저장하지 못했어요. 잠시 후 다시 시도하세요.");
-      if (e) console.error("Supabase 저장 오류", e);
+      ui.busy = false; console.error("저장 오류", e);
+      toast(!navigator.onLine ? "인터넷 연결이 없어 저장하지 못했어요." : explainDbError(e));
       render();
     });
   }
   function songRow(s) { return { title: s.title, composer: s.composer, publisher: s.publisher, collection: s.collection, page: s.page, level: s.level, memo: s.memo, analysis: s.analysis, parts: s.parts, updated_at: new Date().toISOString() }; }
+  function switchedChoir(msg) {
+    return function () { ui.screen = "boot"; ui.admin = false; ui.partTab = {}; return loadAll().then(function () { if (msg) toast(msg); }); };
+  }
 
   /* ---------- events ---------- */
   app.addEventListener("click", function (e) {
     var b = e.target.closest("[data-act]"); if (!b) return;
     var act = b.getAttribute("data-act"), id = b.getAttribute("data-id");
-    if (act === "done") return;
-    if (act === "tab") go(b.getAttribute("data-view"));
+    if (act === "done" || act === "role") return;
+    if (act === "auth-tab") { ui.authTab = b.getAttribute("data-tab"); render(); var f = document.querySelector(".gate-form input"); if (f) f.focus(); }
+    else if (act === "tab") go(b.getAttribute("data-view"));
     else if (act === "date") { ui.selDate = b.getAttribute("data-date"); render(); }
     else if (act === "song") { ui.songId = id; go("song"); }
     else if (act === "part") { ui.partTab[id] = b.getAttribute("data-part"); render(); }
     else if (act === "pub") { ui.pub = b.getAttribute("data-pub"); render(); }
-    else if (act === "mypart") { prefs.part = b.getAttribute("data-part"); ui.partTab = {}; lsSet("choir.prefs", prefs); render(); }
+    else if (act === "mypart") {
+      var part = b.getAttribute("data-part"); profile.part = part; ui.partTab = {}; render();
+      rq(sb.from("profiles").update({ part: part, updated_at: new Date().toISOString() }).eq("id", uid()))
+        .then(function () { toast(PART_NAME[part] + " 파트로 정했어요."); }, function (e) { toast(explainDbError(e)); });
+    }
+    else if (act === "save-profile") {
+      var nm = val("p-name"); if (!nm) { toast("이름을 입력하세요."); return; }
+      write(sb.from("profiles").update({ display_name: nm, updated_at: new Date().toISOString() }).eq("id", uid()), "이름을 저장했어요.", function () { profile.display_name = nm; if (canEdit()) loadMembers(); });
+    }
+    else if (act === "change-pass") {
+      var pw = document.getElementById("p-pass").value;
+      if (pw.length < 6) { toast("비밀번호는 6자 이상으로 정해 주세요."); return; }
+      withTimeout(sb.auth.updateUser({ password: pw }), 15000).then(function (r) {
+        if (r.error) toast(explainAuthError(r.error)); else { document.getElementById("p-pass").value = ""; toast("비밀번호를 바꿨어요."); }
+      }, function (e) { toast(explainAuthError(e)); });
+    }
+    else if (act === "join-choir") {
+      var nm2 = b.getAttribute("data-name");
+      write(sb.rpc("join_choir", { p_choir: id }), "‘" + nm2 + "’ 성가대로 이동했어요.", switchedChoir());
+    }
+    else if (act === "create-choir") {
+      var cn = val("new-choir"); if (!cn) { toast("새 성가대 이름을 입력하세요."); return; }
+      write(sb.rpc("create_choir", { p_name: cn }), "‘" + cn + "’ 성가대를 만들었어요. 상단의 ‘편집’에서 곡을 추가하세요.", switchedChoir());
+    }
+    else if (act === "leave-choir") {
+      if (b.getAttribute("data-confirm") !== "1") { b.setAttribute("data-confirm", "1"); b.textContent = "정말 탈퇴"; return; }
+      var left = choir.name;
+      write(sb.rpc("leave_choir", { p_choir: choir.id }), "‘" + left + "’에서 탈퇴했어요.", switchedChoir());
+    }
+    else if (act === "remove-member") {
+      if (b.getAttribute("data-confirm") !== "1") { b.setAttribute("data-confirm", "1"); b.textContent = "정말 내보내기"; return; }
+      write(sb.rpc("remove_member", { p_choir: choir.id, p_user: id }), "대원을 내보냈어요.", function () { loadMembers(); });
+    }
     else if (act === "metro") { var s = songById(id); if (metro.songId === id) metroStop(); else if (s) metroStart(s); }
     else if (act === "bpm") {
       var s2 = songById(id); if (!s2) return;
@@ -480,16 +685,19 @@
     }
     else if (act === "install") { if (deferredPrompt) { deferredPrompt.prompt(); deferredPrompt.userChoice.finally(function () { deferredPrompt = null; render(); }); } }
     else if (act === "install-x") { prefs.installDismissed = true; lsSet("choir.prefs", prefs); render(); }
-    else if (act === "logout") { sb.auth.signOut().finally(function () { auth.session = null; auth.editor = false; ui.admin = false; render(); }); }
+    else if (act === "logout") {
+      withTimeout(sb.auth.signOut(), 8000).catch(function () {}).then(function () { signedOut("로그아웃했어요."); });
+    }
     else if (act === "admin") { ui.admin = !ui.admin; ui.editSong = null; go(ui.admin ? "admin" : "week"); }
     else if (act === "save-info") {
-      write(sb.from("settings").upsert({ id: 1, choir_name: val("f-choir") || state.choirName, notice: val("f-notice"), updated_at: new Date().toISOString() }), "찬양대 정보를 바꿨어요.");
+      var cname = val("f-choir"); if (!cname) { toast("성가대 이름을 입력하세요."); return; }
+      write(sb.from("choirs").update({ name: cname, notice: val("f-notice"), updated_at: new Date().toISOString() }).eq("id", choir.id), "성가대 정보를 바꿨어요.");
     }
     else if (act === "add-svc") {
       var d = val("f-date"), slot = val("f-slot") || "낮예배", sid = val("f-song");
       if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) { toast("날짜를 선택하세요."); return; }
       if (!sid) { toast("먼저 곡을 추가하세요."); return; }
-      write(sb.from("services").insert({ date: d, slot: slot, song_id: sid }), fmtShort(d) + " " + slot + " 선곡을 추가했어요.");
+      write(sb.from("services").insert({ choir_id: choir.id, date: d, slot: slot, song_id: sid }), fmtShort(d) + " " + slot + " 선곡을 추가했어요.");
     }
     else if (act === "del-svc") {
       if (b.getAttribute("data-confirm") !== "1") { b.setAttribute("data-confirm", "1"); b.textContent = "정말 삭제"; return; }
@@ -505,7 +713,8 @@
     else if (act === "apply-song") {
       var ns = readSongForm(ui.editSong);
       if (!ns.title) { toast("곡명을 입력하세요."); return; }
-      var op = ns.id ? sb.from("songs").update(songRow(ns)).eq("id", ns.id) : sb.from("songs").insert(songRow(ns));
+      var row = songRow(ns);
+      var op = ns.id ? sb.from("songs").update(row).eq("id", ns.id) : sb.from("songs").insert(Object.assign({ choir_id: choir.id }, row));
       ui.editSong = null;
       write(op, "‘" + ns.title + "’ " + (ns.id ? "수정했어요." : "추가했어요."));
     }
@@ -515,31 +724,63 @@
     }
   });
   app.addEventListener("change", function (e) {
-    var t = e.target; if (t.getAttribute("data-act") !== "done") return;
-    var id = t.getAttribute("data-id");
-    if (t.checked) prefs.done[id] = true; else delete prefs.done[id];
-    lsSet("choir.prefs", prefs);
+    var t = e.target, act = t.getAttribute("data-act");
+    if (act === "done") {
+      var id = t.getAttribute("data-id");
+      if (t.checked) prefs.done[id] = true; else delete prefs.done[id];
+      lsSet("choir.prefs", prefs);
+    } else if (act === "role") {
+      var r = t.value, who = t.getAttribute("data-id");
+      write(sb.rpc("set_member_role", { p_choir: choir.id, p_user: who, p_role: r }), ROLE_NAME[r] + (r === "member" ? "으로" : "로") + " 바꿨어요.", function () { loadMembers(); });
+    }
   });
   app.addEventListener("submit", function (e) {
-    if (e.target.id !== "loginform") return;
-    e.preventDefault();
-    var btn = e.target.querySelector("button[type=submit]"); btn.disabled = true; btn.textContent = "로그인 중…";
-    function reset(msg) { btn.disabled = false; btn.textContent = "로그인"; if (msg) toast(msg); }
-    loginInFlight = true;
-    withTimeout(sb.auth.signInWithPassword({ email: val("l-email"), password: document.getElementById("l-pass").value }), 20000).then(function (r) {
-      loginInFlight = false;
-      if (r.error) {
-        var m = r.error.message || "";
-        reset(/confirm/i.test(m) ? "이메일 확인이 안 된 계정이에요. Supabase에서 Auto Confirm으로 다시 만들어 주세요."
-          : /invalid/i.test(m) ? "이메일 또는 비밀번호가 맞지 않아요." : "로그인하지 못했어요: " + m);
-        return;
-      }
-      auth.session = r.data && r.data.session;
-      afterLogin();
-    }, function (e) {
-      loginInFlight = false;
-      reset(e && e.message === "timeout" ? "응답이 없어요. config.js의 Supabase 주소를 확인하거나 잠시 후 다시 시도하세요." : "인터넷 연결을 확인한 뒤 다시 시도하세요.");
-    });
+    var f = e.target; e.preventDefault();
+    var btn = f.querySelector("button[type=submit]"), label = btn ? btn.textContent : "";
+    function busy() { if (btn) { btn.disabled = true; btn.textContent = "처리 중…"; } }
+    function reset(msg) { if (btn) { btn.disabled = false; btn.textContent = label; } if (msg) toast(msg); }
+    var email = val("a-email"), passEl = document.getElementById("a-pass"), pass = passEl ? passEl.value : "";
+
+    if (f.id === "loginform") {
+      busy(); loginInFlight = true;
+      withTimeout(sb.auth.signInWithPassword({ email: email, password: pass }), 20000).then(function (r) {
+        loginInFlight = false;
+        if (r.error) return reset(explainAuthError(r.error));
+        session = r.data.session; ui.screen = "boot"; render(); loadAll();
+      }, function (e) { loginInFlight = false; reset(explainAuthError(e)); });
+    }
+    else if (f.id === "signupform") {
+      var name = val("a-name"), partEl = f.querySelector('input[name="a-part"]:checked'), part = partEl ? partEl.value : "all";
+      if (!name) return reset("이름을 입력하세요.");
+      if (pass.length < 6) return reset("비밀번호는 6자 이상으로 정해 주세요.");
+      busy(); loginInFlight = true;
+      withTimeout(sb.auth.signUp({ email: email, password: pass, options: { data: { display_name: name, part: part } } }), 20000).then(function (r) {
+        loginInFlight = false;
+        if (r.error) return reset(explainAuthError(r.error));
+        if (!r.data.session) {   // 이메일 확인이 켜져 있는 경우
+          ui.authTab = "login"; render();
+          toast("가입 확인 메일을 보냈어요. 메일의 링크를 누른 뒤 로그인하세요. (자동 승인하려면 Supabase에서 ‘Confirm email’을 끄세요)");
+          return;
+        }
+        session = r.data.session; ui.screen = "boot"; render(); loadAll().then(function () { toast(name + "님, 가입을 환영합니다!"); });
+      }, function (e) { loginInFlight = false; reset(explainAuthError(e)); });
+    }
+    else if (f.id === "forgotform") {
+      busy();
+      withTimeout(sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + "/" }), 20000).then(function (r) {
+        if (r.error) return reset(explainAuthError(r.error));
+        reset("재설정 메일을 보냈어요. 메일의 링크를 이 기기에서 열어 주세요.");
+      }, function (e) { reset(explainAuthError(e)); });
+    }
+    else if (f.id === "recoveryform") {
+      if (pass.length < 6) return reset("비밀번호는 6자 이상으로 정해 주세요.");
+      busy();
+      withTimeout(sb.auth.updateUser({ password: pass }), 20000).then(function (r) {
+        if (r.error) return reset(explainAuthError(r.error));
+        history.replaceState(null, "", location.pathname);
+        ui.screen = "boot"; render(); loadAll().then(function () { toast("비밀번호를 바꿨어요."); });
+      }, function (e) { reset(explainAuthError(e)); });
+    }
   });
   // A-B 구간 반복 (timeupdate는 버블링되지 않아 캡처 단계에서 받습니다)
   app.addEventListener("timeupdate", function (e) {
@@ -547,28 +788,38 @@
     if (a.currentTime >= +a.dataset.b) a.currentTime = +a.dataset.a;
   }, true);
 
+  function signedOut(msg) {
+    session = null; profile = null; choir = null; role = null; members = null; choirList = null;
+    state = { songs: [], services: [] }; ui.admin = false; ui.view = "week"; ui.authTab = "login"; ui.screen = "auth";
+    metroStop(); render(); if (msg) toast(msg);
+  }
+
   /* ---------- boot ---------- */
   function boot() {
-    var cached = lsGet(CACHE_KEY, null);
-    if (cached) { applyData(cached); render(); }
-    var authReady = Promise.resolve();
-    if (sb) {
-      authReady = sb.auth.getSession().then(function (r) { auth.session = r.data && r.data.session; return refreshEditor(); });
-      // Supabase 안내대로 이 콜백 안에서는 다른 Supabase 호출을 하지 않고, 다음 틱으로 미룹니다 (멈춤 방지).
-      sb.auth.onAuthStateChange(function (evt, session) {
-        if (evt === "INITIAL_SESSION") return;
-        auth.session = session;
-        if (evt === "SIGNED_OUT") { setTimeout(function () { auth.editor = false; ui.admin = false; toast("로그아웃했어요."); render(); }, 0); return; }
-        if (evt === "SIGNED_IN" && !loginInFlight) setTimeout(afterLogin, 0); // 다른 탭에서 로그인한 경우
-      });
-    } else if (CFG.supabaseUrl) {
-      console.warn("Supabase 라이브러리를 불러오지 못해 읽기 전용으로 동작합니다.");
+    if (!sb) {
+      if (CFG.supabaseUrl) console.warn("Supabase 라이브러리를 불러오지 못했습니다.");
+      ui.screen = "setup"; render(); return;
     }
-    Promise.all([load(), authReady.catch(function () {})]).then(render).catch(function () {
-      app.innerHTML = '<div class="wrap boot">찬양 목록을 불러오지 못했어요. 인터넷 연결을 확인한 뒤 다시 열어 주세요.</div>';
+    render();
+    // Supabase 안내대로 이 콜백 안에서는 다른 Supabase 호출을 하지 않고, 다음 틱으로 미룹니다 (멈춤 방지).
+    sb.auth.onAuthStateChange(function (evt, s) {
+      if (evt === "INITIAL_SESSION") return;
+      if (evt === "PASSWORD_RECOVERY") { session = s; setTimeout(function () { ui.screen = "recovery"; render(); }, 0); return; }
+      if (evt === "SIGNED_OUT") { setTimeout(function () { if (ui.screen !== "auth") signedOut(); }, 0); return; }
+      if (s) session = s;
+      if (evt === "SIGNED_IN" && !loginInFlight && (ui.screen === "auth" || ui.screen === "boot")) setTimeout(loadAll, 0); // 다른 탭에서 로그인
     });
+    withTimeout(sb.auth.getSession(), 10000).then(function (r) {
+      session = r.data && r.data.session;
+      if (ui.screen === "recovery") return;
+      if (!session) { ui.screen = "auth"; render(); return; }
+      var cached = lsGet(cacheKey(), null);
+      if (cached && cached.choir) { applyChoirData(cached); ui.screen = "app"; render(); }   // 먼저 마지막 내용을 보여주고
+      loadAll();                                                                           // 최신으로 바꿈
+    }, function () { ui.screen = "auth"; render(); });
+
     document.addEventListener("visibilitychange", function () {
-      if (document.visibilityState === "visible" && !ui.admin && !ui.busy) load().then(render).catch(function () {});
+      if (document.visibilityState === "visible" && ui.screen === "app" && !ui.admin && !ui.busy) reloadChoir().then(render).catch(function () {});
     });
   }
   boot();
